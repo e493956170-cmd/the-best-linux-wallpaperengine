@@ -73,6 +73,16 @@ def run_test(args):
     def wait_until_exited(pid):
         wait_for(lambda: not Path('/proc/%d' % pid).exists())
 
+    def screenshot(name):
+        path = args.output / (name + '.png')
+        reply = connection.call_sync(
+            'org.gnome.Shell.Screenshot', '/org/gnome/Shell/Screenshot',
+            'org.gnome.Shell.Screenshot', 'Screenshot',
+            GLib.Variant('(bbs)', (False, False, str(path))),
+            None, Gio.DBusCallFlags.NONE, 15000, None)
+        assert reply.unpack()[0]
+        return Image.open(path).convert('RGB')
+
     setting('engine-path', json.dumps(str(args.engine)))
     setting('wallpaper', json.dumps(str(args.wallpaper)))
     setting('assets-dir', json.dumps(str(args.assets_dir)) if args.assets_dir else "''")
@@ -82,8 +92,8 @@ def run_test(args):
 
     with (args.output / 'gnome-shell.log').open('w') as log:
         shell = subprocess.Popen([
-            'gnome-shell', '--headless', '--wayland', '--no-x11',
-            '--virtual-monitor', '2560x1440', '--wayland-display=lwe-smoke'],
+            'gnome-shell', '--headless', '--wayland', '--no-x11', '--wayland-display=lwe-smoke',
+            *(['--virtual-monitor', '2560x1440'] * args.monitors)],
             stdout=log, stderr=subprocess.STDOUT)
         try:
             pid = wait_for(renderer)
@@ -99,22 +109,31 @@ def run_test(args):
                 'RequestName', GLib.Variant('(su)', ('org.gnome.Screenshot', 0)),
                 None, Gio.DBusCallFlags.NONE, 5000, None)
             assert reply.unpack()[0] == 1
+            gi.require_version('Gtk', '3.0')
+            gi.require_version('Gdk', '3.0')
+            from gi.repository import Gdk, Gtk
+            Gtk.init([])
+            display = Gdk.Display.get_default()
+            assert display.get_n_monitors() == args.monitors
+            geometries = [display.get_monitor(index).get_geometry() for index in range(args.monitors)]
+
+            def crop_monitor(image, index):
+                rect = geometries[index]
+                return image.crop((rect.x + 200, rect.y + 200,
+                                   rect.x + rect.width - 200, rect.y + rect.height - 200))
+
             frames = []
             for index in range(2):
                 time.sleep(5)
-                path = args.output / ('background-%d.png' % index)
-                reply = connection.call_sync(
-                    'org.gnome.Shell.Screenshot', '/org/gnome/Shell/Screenshot',
-                    'org.gnome.Shell.Screenshot', 'Screenshot',
-                    GLib.Variant('(bbs)', (False, False, str(path))),
-                    None, Gio.DBusCallFlags.NONE, 15000, None)
-                assert reply.unpack()[0]
-                frame = Image.open(path).convert('RGB').crop((200, 200, 2300, 1300))
-                assert max(ImageStat.Stat(frame).stddev) > 10
-                frames.append(frame)
-            difference = ImageStat.Stat(ImageChops.difference(*frames)).mean
-            assert max(difference) > 1, difference
-            print('PASS: composited background frames change', flush=True)
+                frames.append(screenshot('background-%d' % index))
+            differences = []
+            for index in range(args.monitors):
+                cropped = [crop_monitor(frame, index) for frame in frames]
+                assert max(ImageStat.Stat(cropped[0]).stddev) > 10
+                difference = ImageStat.Stat(ImageChops.difference(*cropped)).mean
+                assert max(difference) > 1, difference
+                differences.append(difference)
+            print('PASS: composited background frames change on every monitor', flush=True)
 
             setting('paused', 'true')
             wait_for(lambda: usage(pid)[0] == 'T')
@@ -125,20 +144,37 @@ def run_test(args):
             wait_for(lambda: usage(pid)[0] != 'T' and usage(pid)[1] > ticks)
             print('PASS: pause stops CPU work and resume restarts it', flush=True)
 
-            fullscreen = subprocess.Popen([sys.executable, '-c', """
+            fullscreen_code = """
+import sys
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 window = Gtk.Window(title='Wallpaper fullscreen test')
-window.fullscreen()
+window.fullscreen_on_monitor(window.get_screen(), int(sys.argv[1]))
 window.show_all()
 Gtk.main()
-"""])
+"""
+            fullscreen = []
             try:
-                wait_for(lambda: usage(pid)[0] == 'T')
+                fullscreen.append(subprocess.Popen([sys.executable, '-c', fullscreen_code, '0']))
+                if args.monitors == 2:
+                    time.sleep(2)
+                    assert usage(pid)[0] != 'T'
+                    first = crop_monitor(screenshot('one-fullscreen-0'), 1)
+                    time.sleep(3)
+                    second = crop_monitor(screenshot('one-fullscreen-1'), 1)
+                    assert max(ImageStat.Stat(ImageChops.difference(first, second)).mean) > 1
+                    print('PASS: one fullscreen monitor leaves the other wallpaper animated', flush=True)
+                    fullscreen.append(subprocess.Popen([sys.executable, '-c', fullscreen_code, '1']))
+                wait_until_paused(pid, True)
+                fullscreen[0].terminate()
+                fullscreen[0].wait(timeout=5)
+                wait_until_paused(pid, False)
             finally:
-                fullscreen.terminate()
-                fullscreen.wait(timeout=5)
+                for process in fullscreen:
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait(timeout=5)
             wait_for(lambda: usage(pid)[0] != 'T')
             print('PASS: fullscreen pause and resume', flush=True)
 
@@ -161,7 +197,8 @@ Gtk.main()
             wait_for(lambda: not Path('/proc/%d' % pid).exists())
             print('PASS: running/paused child cleanup and re-enable', flush=True)
             (args.output / 'result.json').write_text(json.dumps({
-                'passed': True, 'background_difference_rgb': difference,
+                'passed': True, 'monitor_count': args.monitors,
+                'background_difference_rgb': differences,
                 'environment': 'isolated headless GNOME 42; functional test only',
             }, indent=2) + '\n')
         finally:
@@ -194,6 +231,7 @@ def main():
     parser.add_argument('--wallpaper', type=Path, required=True)
     parser.add_argument('--assets-dir', type=Path)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--monitors', type=int, choices=(1, 2), default=1)
     parser.add_argument('--isolated', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.engine = args.engine.resolve(strict=True)
@@ -227,7 +265,7 @@ def main():
         env.pop('DISPLAY', None)
         command = ['dbus-run-session', '--', sys.executable, str(Path(__file__).resolve()),
                    '--isolated', '--engine', str(args.engine), '--wallpaper', str(args.wallpaper),
-                   '--output', str(args.output)]
+                   '--output', str(args.output), '--monitors', str(args.monitors)]
         if args.assets_dir:
             command.extend(['--assets-dir', str(args.assets_dir)])
         try:
@@ -240,7 +278,11 @@ def main():
                       if line.split()[4].startswith(prefix)]
             for mount in sorted(mounts, key=len, reverse=True):
                 unmount = shutil.which('fusermount3') or shutil.which('fusermount')
-                subprocess.run([unmount, '-uz', mount], check=True)
+                result = subprocess.run([unmount, '-uz', mount], capture_output=True, text=True)
+                # The service can unmount itself between our scan and fusermount.
+                if result.returncode and any(line.split()[4] == mount for line in
+                                             Path('/proc/self/mountinfo').read_text().splitlines()):
+                    result.check_returncode()
 
 
 if __name__ == '__main__':

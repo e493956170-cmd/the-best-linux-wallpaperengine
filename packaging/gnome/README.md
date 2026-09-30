@@ -4,9 +4,10 @@ GNOME does not provide the layer-shell protocol used by the engine's Wayland
 background mode. This companion extension starts the engine in a native Wayland
 window and places its surface in GNOME's background group.
 
-Currently supported: **GNOME Shell 42 on Wayland**, primary monitor only. Playback
-is muted, mouse interaction is disabled, and a fullscreen window on the primary
-monitor pauses rendering. Disabling the extension stops its renderer and reveals
+Currently supported: **GNOME Shell 42 on Wayland**. A single renderer shows the same wallpaper on
+all monitors. Playback is muted and mouse interaction is disabled. A fullscreen
+window hides the background on its monitor; playback pauses when every monitor
+is covered. Disabling the extension stops its renderer and reveals
 the original background without changing GNOME's wallpaper settings.
 
 ## Install
@@ -53,7 +54,7 @@ gnome-extensions disable linux-wallpaperengine@almamu.github.io
 ```
 
 Settings other than `paused` restart the renderer. `paused false` releases manual
-pause; a fullscreen window can still keep playback paused. GNOME normally disables
+pause; fullscreen windows covering every monitor can still keep playback paused. GNOME normally disables
 user extensions on the lock screen and re-enables them after unlocking.
 
 If playback does not start, check `gnome-extensions info
@@ -63,11 +64,12 @@ extension errors. An empty wallpaper setting intentionally starts no process.
 ## How it works
 
 `Meta.WaylandClient` identifies the extension's own window. A non-reactive
-`Clutter.Clone` presents that window in `Main.layoutManager._backgroundGroup`, while
+`Clutter.Clone` per monitor presents that window in `Main.layoutManager._backgroundGroup`, while
 the original stays minimized and hidden from the window list. The extension owns
 the renderer process and sends SIGSTOP/SIGCONT for pause, and SIGTERM on disable.
 It resumes a stopped child before terminating it. Monitor changes restart playback
-on the current primary monitor.
+using the updated monitor layout. The source window uses the primary monitor
+size; its image is scaled to fit each monitor.
 
 The background group is a private GNOME API. Newer Shell versions need a separate
 port and testing; changing the metadata version list alone is not sufficient.
@@ -87,6 +89,8 @@ python3 packaging/gnome/smoke-test.py \
 
 The test starts a separate headless GNOME session. It checks changing background
 frames, pause/resume, fullscreen pausing, settings-driven restart, and cleanup on
-disable. This is a functional test, not a desktop performance benchmark. Regular
+disable. This is a functional test, not a desktop performance benchmark. Add `--monitors 2` to check
+both backgrounds, continued playback with one fullscreen monitor, and pause when
+both monitors are covered. Regular
 desktop performance, lock/unlock, and mixed-scale multi-monitor behavior still
 need testing.

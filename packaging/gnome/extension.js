@@ -13,6 +13,7 @@ class WallpaperExtension {
         this._enabled = true;
         this._signals = [];
         this._windowSignals = [];
+        this._clones = [];
         this._settings = ExtensionUtils.getSettings();
         this._connect(global.window_manager, 'map', (_wm, actor) => this._attach(actor));
         this._connect(global.display, 'in-fullscreen-changed', () => this._updatePause());
@@ -86,7 +87,7 @@ class WallpaperExtension {
 
     _attach(actor) {
         const window = actor.meta_window;
-        if (!this._client || !this._client.owns_window(window) || this._clone)
+        if (!this._client || !this._client.owns_window(window) || this._clones.length)
             return;
 
         const monitor = Main.layoutManager.primaryMonitor;
@@ -94,11 +95,14 @@ class WallpaperExtension {
         this._client.hide_from_window_list(window);
         window.move_to_monitor(monitor.index);
         window.move_resize_frame(false, monitor.x, monitor.y, monitor.width, monitor.height);
-        this._clone = new Clutter.Clone({
-            source: actor, reactive: false,
-            x: monitor.x, y: monitor.y, width: monitor.width, height: monitor.height,
-        });
-        Main.layoutManager._backgroundGroup.add_child(this._clone);
+        for (const output of Main.layoutManager.monitors) {
+            const clone = new Clutter.Clone({
+                source: actor, reactive: false,
+                x: output.x, y: output.y, width: output.width, height: output.height,
+            });
+            Main.layoutManager._backgroundGroup.add_child(clone);
+            this._clones.push(clone);
+        }
         // Clutter keeps the cloned surface painted while the source window is minimized.
         this._windowSignals.push([window, window.connect('notify::minimized', () => {
             if (this._enabled && !window.minimized)
@@ -110,10 +114,13 @@ class WallpaperExtension {
     }
 
     _updatePause() {
-        if (!this._process || !this._clone || !Main.layoutManager.primaryMonitor)
+        if (!this._process || !this._clones.length)
             return;
+        const monitors = Main.layoutManager.monitors;
+        for (let index = 0; index < this._clones.length; index++)
+            this._clones[index].visible = !global.display.get_monitor_in_fullscreen(monitors[index].index);
         const paused = this._settings.get_boolean('paused') ||
-            global.display.get_monitor_in_fullscreen(Main.layoutManager.primaryMonitor.index);
+            monitors.every(monitor => global.display.get_monitor_in_fullscreen(monitor.index));
         if (paused !== this._paused) {
             this._process.send_signal(paused ? 19 : 18); // SIGSTOP / SIGCONT on Linux
             this._paused = paused;
@@ -124,10 +131,9 @@ class WallpaperExtension {
         for (const [object, id] of this._windowSignals)
             object.disconnect(id);
         this._windowSignals = [];
-        if (this._clone) {
-            this._clone.destroy();
-            this._clone = null;
-        }
+        for (const clone of this._clones)
+            clone.destroy();
+        this._clones = [];
         this._window = null;
     }
 
