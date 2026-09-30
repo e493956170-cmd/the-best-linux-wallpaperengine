@@ -7,7 +7,8 @@ window and places its surface in GNOME's background group.
 Currently supported: **GNOME Shell 42 on Wayland**. A single renderer shows the same wallpaper on
 all monitors. Playback is muted and mouse interaction is disabled. A fullscreen
 window hides the background on its monitor; playback pauses when every monitor
-is covered. Disabling the extension stops its renderer and reveals
+is covered. Lock screen backgrounds can use different projects on each monitor,
+while keeping GNOME's blur, clock and password prompt. Disabling the extension stops its renderers and reveals
 the original background without changing GNOME's wallpaper settings.
 
 ## Install
@@ -53,9 +54,24 @@ gsettings --schemadir "$schema_dir" set "$schema" paused false
 gnome-extensions disable linux-wallpaperengine@almamu.github.io
 ```
 
-Settings other than `paused` restart the renderer. `paused false` releases manual
-pause; fullscreen windows covering every monitor can still keep playback paused. GNOME normally disables
-user extensions on the lock screen and re-enables them after unlocking.
+`paused false` releases manual pause; fullscreen windows covering every monitor
+can still keep desktop playback paused. Lock screen playback ignores desktop
+fullscreen windows. The extension remains enabled in GNOME's `unlock-dialog` mode.
+
+Configure lock backgrounds in GNOME monitor index order (0, 1, ...):
+
+```sh
+gsettings --schemadir "$schema_dir" set "$schema" lock-wallpapers "['/absolute/path/to/first-project', '/absolute/path/to/second-project']"
+# Optional horizontal mirroring per monitor:
+gsettings --schemadir "$schema_dir" set "$schema" lock-mirrors '[false, true]'
+```
+
+An empty list or empty entry uses the desktop wallpaper. Identical project values
+share one renderer, including the desktop project; different values start separate
+renderers while the lock screen is present. Unused desktop playback pauses during
+lock, and lock-only renderers stop after unlocking. Lock settings update only lock
+backgrounds. Other settings and monitor changes restart playback. Save your work
+and log out/in after updating the extension so GNOME loads its new code and session modes.
 
 If playback does not start, check `gnome-extensions info
 linux-wallpaperengine@almamu.github.io` and `journalctl --user -b` for engine or
@@ -66,12 +82,17 @@ extension errors. An empty wallpaper setting intentionally starts no process.
 `Meta.WaylandClient` identifies the extension's own window. A non-reactive
 `Clutter.Clone` per monitor presents that window in `Main.layoutManager._backgroundGroup`, while
 the original stays minimized and hidden from the window list. The extension owns
-the renderer process and sends SIGSTOP/SIGCONT for pause, and SIGTERM on disable.
+the renderer processes and sends SIGSTOP/SIGCONT for pause, and SIGTERM on disable.
+If a hidden client does not exit within five seconds, it is forcibly stopped.
 It resumes a stopped child before terminating it. Monitor changes restart playback
 using the updated monitor layout. The source window uses the primary monitor
 size; its image is scaled to fit each monitor.
 
-The background group is a private GNOME API. Newer Shell versions need a separate
+Lock backgrounds clone only the extension's own native Wayland surfaces into
+`UnlockDialog`'s per-monitor background widgets. Authentication and input handling
+stay with GNOME. The hook is restored on disable and the original backgrounds return.
+
+The desktop background group and lock background methods are private GNOME APIs. Newer Shell versions need a separate
 port and testing; changing the metadata version list alone is not sufficient.
 
 ## Verification
@@ -91,6 +112,9 @@ The test starts a separate headless GNOME session. It checks changing background
 frames, pause/resume, fullscreen pausing, settings-driven restart, and cleanup on
 disable. This is a functional test, not a desktop performance benchmark. Add `--monitors 2` to check
 both backgrounds, continued playback with one fullscreen monitor, and pause when
-both monitors are covered. Regular
-desktop performance, lock/unlock, and mixed-scale multi-monitor behavior still
-need testing.
+both monitors are covered. Add `--lock-wallpaper /absolute/path/to/another-video-project`
+to also check different animated lock backgrounds, the password prompt remaining
+visible, manual pause, unlock cleanup, repeated activation, and disable/re-enable
+while the shield is present. The isolated test activates the real GNOME screen
+shield with a test-only probe; it does not validate password authentication.
+Regular desktop performance and mixed-scale multi-monitor behavior still need testing.

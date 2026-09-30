@@ -3,6 +3,7 @@
 
 const {Clutter, Gio, GLib, Meta} = imports.gi;
 const Main = imports.ui.main;
+const UnlockDialog = imports.ui.unlockDialog;
 const ExtensionUtils = imports.misc.extensionUtils;
 
 class WallpaperExtension {
@@ -12,18 +13,23 @@ class WallpaperExtension {
 
         this._enabled = true;
         this._signals = [];
-        this._windowSignals = [];
-        this._clones = [];
+        this._renderers = new Map();
+        this._lockBackgrounds = new Map();
         this._settings = ExtensionUtils.getSettings();
         this._connect(global.window_manager, 'map', (_wm, actor) => this._attach(actor));
         this._connect(global.display, 'in-fullscreen-changed', () => this._updatePause());
         this._connect(Main.layoutManager, 'monitors-changed', () => this._restart());
+        this._connect(Main.sessionMode, 'updated', () => this._syncSession());
+        this._connect(Main.screenShield, 'locked-changed', () => this._syncSession());
         this._connect(this._settings, 'changed', (_settings, key) => {
             if (key === 'paused')
                 this._updatePause();
+            else if (key === 'lock-wallpapers' || key === 'lock-mirrors')
+                this._refreshLockBackgrounds();
             else
                 this._restart();
         });
+        this._installLockBackgrounds();
         if (Main.layoutManager._startingUp)
             this._connect(Main.layoutManager, 'startup-complete', () => this._launch());
         else
@@ -34,21 +40,27 @@ class WallpaperExtension {
         this._signals.push([object, object.connect(signal, callback)]);
     }
 
-    _launch() {
-        if (!this._enabled || this._process || !Main.layoutManager.primaryMonitor)
-            return;
+    _isLocked() {
+        return Main.sessionMode.currentMode === 'unlock-dialog' || Main.screenShield.locked;
+    }
 
-        const wallpaper = this._settings.get_string('wallpaper');
-        if (!wallpaper) {
-            log('linux-wallpaperengine: configure a wallpaper before starting playback');
+    _launch() {
+        if (!this._enabled || !Main.layoutManager.primaryMonitor)
             return;
-        }
+        this._desktop = this._ensureRenderer(this._settings.get_string('wallpaper'),
+            Main.layoutManager.primaryMonitor);
+        const dialog = Main.screenShield._dialog;
+        if (dialog)
+            dialog._updateBackgrounds();
+        this._updatePause();
+    }
+
+    _rendererCommand(wallpaper, monitor) {
         const executable = GLib.find_program_in_path(this._settings.get_string('engine-path'));
         if (!executable) {
             log('linux-wallpaperengine: engine-path does not point to an executable');
-            return;
+            return null;
         }
-        const monitor = Main.layoutManager.primaryMonitor;
         const argv = [
             executable, '--window', `0x0x${monitor.width}x${monitor.height}`,
             '--fps', String(this._settings.get_uint('fps')),
@@ -59,95 +71,211 @@ class WallpaperExtension {
             argv.push('--assets-dir', assets);
         argv.push(wallpaper);
 
+        return argv;
+    }
+
+    _ensureRenderer(wallpaper, monitor) {
+        if (!wallpaper)
+            return null;
+        if (this._renderers.has(wallpaper))
+            return this._renderers.get(wallpaper);
+        const argv = this._rendererCommand(wallpaper, monitor);
+        if (!argv)
+            return null;
+
         const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
+        const renderer = {wallpaper, signals: [], clones: [], paused: false, actor: null};
         try {
-            this._client = Meta.WaylandClient.new(launcher);
-            this._process = this._client.spawnv(global.display, argv);
+            renderer.client = Meta.WaylandClient.new(launcher);
+            renderer.process = renderer.client.spawnv(global.display, argv);
         } catch (error) {
-            this._client = null;
             logError(error, 'linux-wallpaperengine: failed to start renderer');
-            return;
+            return null;
         } finally {
             launcher.close();
         }
-        this._paused = false;
-        const process = this._process;
+        this._renderers.set(wallpaper, renderer);
         // Keep the native client alive until its child has been reaped, even on disable.
-        const client = this._client;
-        process.wait_async(null, (source, result) => {
+        renderer.process.wait_async(null, (source, result) => {
             source.wait_finish(result);
-            if (this._process !== process || this._client !== client)
+            renderer.exited = true;
+            if (renderer.shutdownId) {
+                GLib.source_remove(renderer.shutdownId);
+                renderer.shutdownId = 0;
+            }
+            if (this._renderers.get(wallpaper) !== renderer)
                 return;
-            this._process = null;
-            this._client = null;
-            this._clearWindow();
+            this._renderers.delete(wallpaper);
+            this._clearWindow(renderer);
             log('linux-wallpaperengine: renderer exited');
         });
+        return renderer;
     }
 
     _attach(actor) {
         const window = actor.meta_window;
-        if (!this._client || !this._client.owns_window(window) || this._clones.length)
+        const renderer = [...this._renderers.values()].find(candidate =>
+            candidate.client.owns_window(window));
+        if (!renderer || renderer.actor)
             return;
-
         const monitor = Main.layoutManager.primaryMonitor;
-        this._window = window;
-        this._client.hide_from_window_list(window);
+        renderer.actor = actor;
+        renderer.window = window;
+        renderer.client.hide_from_window_list(window);
         window.move_to_monitor(monitor.index);
         window.move_resize_frame(false, monitor.x, monitor.y, monitor.width, monitor.height);
-        for (const output of Main.layoutManager.monitors) {
-            const clone = new Clutter.Clone({
-                source: actor, reactive: false,
-                x: output.x, y: output.y, width: output.width, height: output.height,
-            });
-            Main.layoutManager._backgroundGroup.add_child(clone);
-            this._clones.push(clone);
+        if (renderer === this._desktop) {
+            for (const output of Main.layoutManager.monitors) {
+                const clone = new Clutter.Clone({
+                    source: actor, reactive: false,
+                    x: output.x, y: output.y, width: output.width, height: output.height,
+                });
+                Main.layoutManager._backgroundGroup.add_child(clone);
+                renderer.clones.push(clone);
+            }
+        }
+        for (const binding of this._lockBackgrounds.values()) {
+            if (binding.renderer === renderer)
+                this._cloneLockBackground(binding);
         }
         // Clutter keeps the cloned surface painted while the source window is minimized.
-        this._windowSignals.push([window, window.connect('notify::minimized', () => {
+        renderer.signals.push([window, window.connect('notify::minimized', () => {
             if (this._enabled && !window.minimized)
                 window.minimize();
         })]);
-        this._windowSignals.push([window, window.connect('unmanaged', () => this._clearWindow())]);
+        renderer.signals.push([window, window.connect('unmanaged', () => this._clearWindow(renderer))]);
         window.minimize();
         this._updatePause();
     }
 
-    _updatePause() {
-        if (!this._process || !this._clones.length)
+    _installLockBackgrounds() {
+        const extension = this;
+        this._originalCreateBackground = UnlockDialog.UnlockDialog.prototype._createBackground;
+        this._createBackground = function (monitorIndex) {
+            extension._originalCreateBackground.call(this, monitorIndex);
+            if (extension._enabled)
+                extension._bindLockBackground(this._backgroundGroup.get_last_child(), monitorIndex);
+        };
+        UnlockDialog.UnlockDialog.prototype._createBackground = this._createBackground;
+    }
+
+    _bindLockBackground(widget, monitorIndex) {
+        const monitor = Main.layoutManager.monitors[monitorIndex];
+        const wallpapers = this._settings.get_strv('lock-wallpapers');
+        const wallpaper = wallpapers[monitorIndex] || this._settings.get_string('wallpaper');
+        const binding = {
+            widget, monitorIndex, backgrounds: widget.get_children(), clone: null,
+            renderer: this._ensureRenderer(wallpaper, monitor),
+        };
+        binding.destroyId = widget.connect('destroy', () => this._lockBackgrounds.delete(widget));
+        this._lockBackgrounds.set(widget, binding);
+        if (binding.renderer && binding.renderer.actor)
+            this._cloneLockBackground(binding);
+        this._updatePause();
+    }
+
+    _cloneLockBackground(binding) {
+        if (binding.clone)
             return;
+        const monitor = Main.layoutManager.monitors[binding.monitorIndex];
+        const mirrored = this._settings.get_value('lock-mirrors').deep_unpack()[binding.monitorIndex];
+        binding.clone = new Clutter.Clone({
+            source: binding.renderer.actor, reactive: false,
+            width: monitor.width, height: monitor.height,
+        });
+        if (mirrored) {
+            binding.clone.set_pivot_point(0.5, 0.5);
+            binding.clone.scale_x = -1;
+        }
+        binding.widget.add_child(binding.clone);
+        for (const background of binding.backgrounds)
+            background.hide();
+    }
+
+    _refreshLockBackgrounds() {
+        for (const renderer of this._renderers.values()) {
+            if (renderer !== this._desktop)
+                this._stopRenderer(renderer);
+        }
+        const dialog = Main.screenShield._dialog;
+        if (dialog)
+            dialog._updateBackgrounds();
+        this._updatePause();
+    }
+
+    _syncSession() {
+        if (!this._isLocked()) {
+            for (const renderer of this._renderers.values()) {
+                if (renderer !== this._desktop)
+                    this._stopRenderer(renderer);
+            }
+        }
+        this._updatePause();
+    }
+
+    _updatePause() {
+        const locked = this._isLocked();
         const monitors = Main.layoutManager.monitors;
-        for (let index = 0; index < this._clones.length; index++)
-            this._clones[index].visible = !global.display.get_monitor_in_fullscreen(monitors[index].index);
-        const paused = this._settings.get_boolean('paused') ||
-            monitors.every(monitor => global.display.get_monitor_in_fullscreen(monitor.index));
-        if (paused !== this._paused) {
-            this._process.send_signal(paused ? 19 : 18); // SIGSTOP / SIGCONT on Linux
-            this._paused = paused;
+        for (const renderer of this._renderers.values()) {
+            let visible = false;
+            for (let index = 0; index < renderer.clones.length; index++) {
+                const clone = renderer.clones[index];
+                clone.visible = !locked && !global.display.get_monitor_in_fullscreen(monitors[index].index);
+                visible ||= clone.visible;
+            }
+            if (locked) {
+                visible ||= [...this._lockBackgrounds.values()].some(binding =>
+                    binding.renderer === renderer && binding.clone);
+            }
+            // Do not suspend a client before its first window has mapped.
+            const paused = !!renderer.actor && (this._settings.get_boolean('paused') || !visible);
+            if (paused !== renderer.paused) {
+                renderer.process.send_signal(paused ? 19 : 18); // SIGSTOP / SIGCONT on Linux
+                renderer.paused = paused;
+            }
         }
     }
 
-    _clearWindow() {
-        for (const [object, id] of this._windowSignals)
+    _clearWindow(renderer) {
+        for (const [object, id] of renderer.signals)
             object.disconnect(id);
-        this._windowSignals = [];
-        for (const clone of this._clones)
+        renderer.signals = [];
+        for (const clone of renderer.clones)
             clone.destroy();
-        this._clones = [];
-        this._window = null;
+        renderer.clones = [];
+        for (const binding of this._lockBackgrounds.values()) {
+            if (binding.renderer !== renderer)
+                continue;
+            if (binding.clone)
+                binding.clone.destroy();
+            binding.clone = null;
+            for (const background of binding.backgrounds)
+                background.show();
+        }
+        renderer.actor = null;
+        renderer.window = null;
+    }
+
+    _stopRenderer(renderer) {
+        this._renderers.delete(renderer.wallpaper);
+        if (renderer.paused)
+            renderer.process.send_signal(18); // Let a stopped process handle SIGTERM.
+        renderer.process.send_signal(15);
+        // A hidden Wayland client can remain blocked waiting for a frame callback.
+        // Bound shutdown so unlocking/disable cannot leave a decoder running.
+        renderer.shutdownId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 5000, () => {
+            renderer.shutdownId = 0;
+            if (!renderer.exited)
+                renderer.process.force_exit();
+            return GLib.SOURCE_REMOVE;
+        });
+        this._clearWindow(renderer);
     }
 
     _stop() {
-        const process = this._process;
-        this._process = null;
-        if (process) {
-            if (this._paused)
-                process.send_signal(18); // Let a stopped process handle SIGTERM.
-            process.send_signal(15);
-        }
-        this._paused = false;
-        this._clearWindow();
-        this._client = null;
+        for (const renderer of this._renderers.values())
+            this._stopRenderer(renderer);
+        this._desktop = null;
     }
 
     _restart() {
@@ -163,6 +291,14 @@ class WallpaperExtension {
             object.disconnect(id);
         this._signals = [];
         this._stop();
+        for (const binding of this._lockBackgrounds.values())
+            binding.widget.disconnect(binding.destroyId);
+        this._lockBackgrounds.clear();
+        if (UnlockDialog.UnlockDialog.prototype._createBackground === this._createBackground)
+            UnlockDialog.UnlockDialog.prototype._createBackground = this._originalCreateBackground;
+        const dialog = Main.screenShield._dialog;
+        if (dialog)
+            dialog._updateBackgrounds();
         this._settings = null;
     }
 }

@@ -17,6 +17,43 @@ UUID = 'linux-wallpaperengine@almamu.github.io'
 SCHEMA = 'org.gnome.shell.extensions.linux-wallpaperengine'
 SOURCE = Path(__file__).resolve().parent
 
+PROBE_UUID = 'wallpaper-test-probe@local.test'
+# Installed only inside the disposable session. This exposes no unlock method.
+TEST_PROBE = """
+const {Gio} = imports.gi;
+const Main = imports.ui.main;
+const XML = `<node><interface name="org.gnome.WallpaperTestProbe">
+<method name="Wake"/><method name="ShowPrompt"/>
+<method name="GetState"><arg type="s" direction="out"/></method>
+</interface></node>`;
+class Probe {
+    enable() {
+        this._object = Gio.DBusExportedObject.wrapJSObject(XML, this);
+        this._object.export(Gio.DBus.session, '/org/gnome/WallpaperTestProbe');
+        this._owner = Gio.bus_own_name_on_connection(Gio.DBus.session,
+            'org.gnome.WallpaperTestProbe', Gio.BusNameOwnerFlags.NONE, null, null);
+    }
+    Wake() {
+        Main.screenShield._longLightbox.lightOff();
+        Main.screenShield._shortLightbox.lightOff();
+    }
+    ShowPrompt() { Main.screenShield._dialog._showPrompt(); }
+    GetState() {
+        const dialog = Main.screenShield._dialog;
+        return JSON.stringify({
+            mode: Main.sessionMode.currentMode,
+            backgrounds: dialog ? dialog._backgroundGroup.get_n_children() : 0,
+            promptVisible: dialog ? dialog._promptBox.visible : false,
+        });
+    }
+    disable() {
+        this._object.unexport();
+        Gio.bus_unown_name(this._owner);
+    }
+}
+function init() { return new Probe(); }
+"""
+
 
 def wait_for(predicate):
     deadline = time.monotonic() + 60
@@ -46,7 +83,7 @@ def run_test(args):
             '--object-path', '/org/gnome/Shell',
             '--method', 'org.gnome.Shell.Extensions.' + method, UUID], text=True)
 
-    def renderer():
+    def renderer_for(project):
         returncode = shell.poll()
         if returncode is not None:
             raise AssertionError('gnome-shell exited with code %s' % returncode)
@@ -58,9 +95,12 @@ def run_test(args):
                 argv = Path('/proc/%s/cmdline' % child).read_bytes().split(b'\0')
             except FileNotFoundError:
                 continue
-            if str(args.wallpaper).encode() in argv:
+            if str(project).encode() in argv:
                 return int(child)
         return None
+
+    def renderer():
+        return renderer_for(args.wallpaper)
 
     def usage(pid):
         # Fields after comm start with state (field 3); comm can contain spaces.
@@ -87,7 +127,7 @@ def run_test(args):
     setting('wallpaper', json.dumps(str(args.wallpaper)))
     setting('assets-dir', json.dumps(str(args.assets_dir)) if args.assets_dir else "''")
     subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'enabled-extensions',
-                    "['%s']" % UUID], check=True)
+                    json.dumps([UUID, PROBE_UUID])], check=True)
     subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'disabled-extensions', '[]'], check=True)
 
     with (args.output / 'gnome-shell.log').open('w') as log:
@@ -167,6 +207,11 @@ Gtk.main()
                     print('PASS: one fullscreen monitor leaves the other wallpaper animated', flush=True)
                     fullscreen.append(subprocess.Popen([sys.executable, '-c', fullscreen_code, '1']))
                 wait_until_paused(pid, True)
+                if args.lock_wallpaper:
+                    test_lock_screen(args, connection, setting, screenshot, crop_monitor,
+                                     renderer_for, usage, extension, pid)
+                    pid = wait_for(renderer)
+                    wait_until_paused(pid, True)
                 fullscreen[0].terminate()
                 fullscreen[0].wait(timeout=5)
                 wait_until_paused(pid, False)
@@ -199,47 +244,144 @@ Gtk.main()
             (args.output / 'result.json').write_text(json.dumps({
                 'passed': True, 'monitor_count': args.monitors,
                 'background_difference_rgb': differences,
+                'lock_screen_tested': bool(args.lock_wallpaper),
                 'environment': 'isolated headless GNOME 42; functional test only',
             }, indent=2) + '\n')
         finally:
-            if shell.poll() is None:
+            stop_test_session(shell, extension, renderer)
+
+
+def stop_test_session(shell, extension, renderer):
+    if shell.poll() is None:
+        try:
+            extension('DisableExtension')
+        finally:
+            # A renderer stuck during startup may not handle SIGTERM. Only
+            # kill a child still owned by this test's compositor.
+            deadline = time.monotonic() + 5
+            while renderer() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            child = renderer()
+            if child:
                 try:
-                    extension('DisableExtension')
-                finally:
-                    # A renderer stuck during startup may not handle SIGTERM. Only
-                    # kill a child still owned by this test's compositor.
-                    deadline = time.monotonic() + 5
-                    while renderer() and time.monotonic() < deadline:
-                        time.sleep(0.1)
-                    child = renderer()
-                    if child:
-                        try:
-                            os.kill(child, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    shell.terminate()
-                    try:
-                        shell.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        shell.kill()
-                        shell.wait()
+                    os.kill(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            shell.terminate()
+            try:
+                shell.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                shell.kill()
+                shell.wait()
+
+
+def test_lock_screen(args, connection, setting, screenshot, crop_monitor,
+                     renderer_for, usage, extension, desktop_pid):
+    from gi.repository import Gio, GLib
+    from PIL import ImageChops, ImageStat
+
+    def probe(method):
+        return connection.call_sync(
+            'org.gnome.WallpaperTestProbe', '/org/gnome/WallpaperTestProbe',
+            'org.gnome.WallpaperTestProbe', method, None, None,
+            Gio.DBusCallFlags.NONE, 15000, None).unpack()
+
+    def screen_saver(method, parameters=None):
+        return connection.call_sync(
+            'org.gnome.ScreenSaver', '/org/gnome/ScreenSaver', 'org.gnome.ScreenSaver',
+            method, parameters, None, Gio.DBusCallFlags.NONE, 15000, None).unpack()
+
+    # SetActive exercises the real shield/dialog without requiring credentials
+    # in the disposable compositor. Never issue these calls on the user's bus.
+    wallpapers = [str(args.wallpaper)]
+    if args.monitors == 2:
+        wallpapers.append(str(args.lock_wallpaper))
+    else:
+        wallpapers[0] = str(args.lock_wallpaper)
+    setting('lock-wallpapers', json.dumps(wallpapers))
+    setting('lock-mirrors', '[false, true]' if args.monitors == 2 else '[false]')
+    desktop_pid = wait_for(lambda: renderer_for(args.wallpaper))
+    wait_for(lambda: usage(desktop_pid)[0] == 'T')
+    screen_saver('SetActive', GLib.Variant('(b)', (True,)))
+    wait_for(lambda: screen_saver('GetActive')[0])
+    probe('Wake')
+    state = json.loads(probe('GetState')[0])
+    assert state['mode'] == 'unlock-dialog' and state['backgrounds'] == args.monitors, state
+    lock_pid = wait_for(lambda: renderer_for(args.lock_wallpaper))
+    wait_for(lambda: usage(lock_pid)[0] != 'T')
+    assert "'error': <''>" in extension('GetExtensionInfo')
+    frames = []
+    for index in range(2):
+        time.sleep(5)
+        frames.append(screenshot('lock-%d' % index))
+    differences = []
+    for index in range(args.monitors):
+        cropped = [crop_monitor(frame, index) for frame in frames]
+        assert max(ImageStat.Stat(cropped[0]).stddev) > 5
+        difference = ImageStat.Stat(ImageChops.difference(*cropped)).mean
+        assert max(difference) > 0.3, difference
+        differences.append(difference)
+    if args.monitors == 2:
+        left, right = [crop_monitor(frames[0], index) for index in range(2)]
+        assert max(ImageStat.Stat(ImageChops.difference(left, right)).mean) > 3
+        assert usage(desktop_pid)[0] != 'T', 'Lock playback must ignore desktop fullscreen windows'
+    else:
+        assert usage(desktop_pid)[0] == 'T', 'Unused desktop renderer must pause on lock'
+    probe('ShowPrompt')
+    wait_for(lambda: json.loads(probe('GetState')[0])['promptVisible'])
+    screenshot('lock-prompt')
+    setting('paused', 'true')
+    wait_for(lambda: usage(lock_pid)[0] == 'T')
+    setting('paused', 'false')
+    wait_for(lambda: usage(lock_pid)[0] != 'T')
+    screen_saver('SetActive', GLib.Variant('(b)', (False,)))
+    wait_for(lambda: not screen_saver('GetActive')[0])
+    wait_for(lambda: not Path('/proc/%d' % lock_pid).exists())
+    print('PASS: independent animated lock backgrounds, pause and unlock cleanup', flush=True)
+    (args.output / 'lock-result.json').write_text(json.dumps({
+        'passed': True, 'monitor_count': args.monitors,
+        'background_difference_rgb': differences,
+        'environment': 'isolated GNOME screen shield; no authentication bypass tested',
+    }, indent=2) + '\n')
+    # Repeated activation catches hooks or clones left over after dialog destruction.
+    screen_saver('SetActive', GLib.Variant('(b)', (True,)))
+    lock_pid = wait_for(lambda: renderer_for(args.lock_wallpaper))
+    wait_for(lambda: screen_saver('GetActive')[0])
+    assert 'true' in extension('DisableExtension')
+    wait_for(lambda: not Path('/proc/%d' % lock_pid).exists())
+    assert 'true' in extension('EnableExtension')
+    wait_for(lambda: renderer_for(args.lock_wallpaper))
+    screen_saver('SetActive', GLib.Variant('(b)', (False,)))
+    wait_for(lambda: not screen_saver('GetActive')[0])
+    setting('lock-wallpapers', '[]')
+    setting('lock-mirrors', '[]')
+    print('PASS: lock background restore on disable and re-enable while locked', flush=True)
 
 
 def main():
+    global UUID, SCHEMA, SOURCE
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--extension-source', type=Path, default=SOURCE)
     parser.add_argument('--engine', type=Path, required=True)
     parser.add_argument('--wallpaper', type=Path, required=True)
     parser.add_argument('--assets-dir', type=Path)
+    parser.add_argument('--lock-wallpaper', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--monitors', type=int, choices=(1, 2), default=1)
     parser.add_argument('--isolated', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    SOURCE = args.extension_source.resolve(strict=True)
+    metadata = json.loads((SOURCE / 'metadata.json').read_text())
+    UUID = metadata['uuid']
+    SCHEMA = metadata['settings-schema']
     args.engine = args.engine.resolve(strict=True)
     args.wallpaper = args.wallpaper.resolve(strict=True)
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     if args.assets_dir:
         args.assets_dir = args.assets_dir.resolve(strict=True)
+    if args.lock_wallpaper:
+        args.lock_wallpaper = args.lock_wallpaper.resolve(strict=True)
     if args.isolated:
         run_test(args)
         return
@@ -252,6 +394,14 @@ def main():
             path = root / name
             path.mkdir(mode=0o700)
             env[key] = str(path)
+        probe_dir = root / 'data/gnome-shell/extensions' / PROBE_UUID
+        probe_dir.mkdir(parents=True)
+        (probe_dir / 'extension.js').write_text(TEST_PROBE)
+        (probe_dir / 'metadata.json').write_text(json.dumps({
+            'uuid': PROBE_UUID, 'name': 'Wallpaper test probe',
+            'description': 'Isolated integration test only', 'shell-version': ['42'],
+            'session-modes': ['user', 'unlock-dialog'],
+        }))
         extension = root / 'data/gnome-shell/extensions' / UUID
         (extension / 'schemas').mkdir(parents=True)
         for name in ('extension.js', 'metadata.json'):
@@ -264,8 +414,10 @@ def main():
                    SDL_AUDIODRIVER='dummy')
         env.pop('DISPLAY', None)
         command = ['dbus-run-session', '--', sys.executable, str(Path(__file__).resolve()),
-                   '--isolated', '--engine', str(args.engine), '--wallpaper', str(args.wallpaper),
+                   '--isolated', '--extension-source', str(SOURCE), '--engine', str(args.engine), '--wallpaper', str(args.wallpaper),
                    '--output', str(args.output), '--monitors', str(args.monitors)]
+        if args.lock_wallpaper:
+            command.extend(['--lock-wallpaper', str(args.lock_wallpaper)])
         if args.assets_dir:
             command.extend(['--assets-dir', str(args.assets_dir)])
         try:

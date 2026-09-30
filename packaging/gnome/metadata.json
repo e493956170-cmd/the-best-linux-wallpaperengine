@@ -1,11 +1,15 @@
 {
   "uuid": "linux-wallpaperengine@almamu.github.io",
   "name": "Linux Wallpaper Engine",
-  "description": "Run linux-wallpaperengine across GNOME Wayland desktop backgrounds with one shared renderer.",
+  "description": "Native Wayland desktop and per-monitor lock screen wallpapers for GNOME 42.",
   "shell-version": [
     "42"
   ],
   "settings-schema": "org.gnome.shell.extensions.linux-wallpaperengine",
   "url": "https://github.com/Almamu/linux-wallpaperengine",
-  "version": 2
+  "version": 3,
+  "session-modes": [
+    "user",
+    "unlock-dialog"
+  ]
 }

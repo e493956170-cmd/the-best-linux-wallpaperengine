@@ -13,6 +13,14 @@
       <default>''</default>
       <summary>Absolute assets directory, or empty for engine auto-detection</summary>
     </key>
+    <key name="lock-wallpapers" type="as">
+      <default>[]</default>
+      <summary>Lock screen wallpaper per monitor; empty entries use the desktop wallpaper</summary>
+    </key>
+    <key name="lock-mirrors" type="ab">
+      <default>[]</default>
+      <summary>Mirror the lock screen wallpaper horizontally on each selected monitor</summary>
+    </key>
     <key name="fps" type="u">
       <default>30</default>
       <range min="1" max="240"/>
