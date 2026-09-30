@@ -1,18 +1,11 @@
-<p align="center">
-	<a href="https://github.com/Almamu/linux-wallpaperengine/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Almamu/linux-wallpaperengine" /></a>
-    <a href="https://github.com/Almamu/linux-wallpaperengine/actions?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/Almamu/linux-wallpaperengine/cmake.yml?branch=main" /></a>
-    <img src="https://img.shields.io/coderabbit/prs/github/Almamu/linux-wallpaperengine?utm_source=oss&utm_medium=github&utm_campaign=Almamu%2Flinux-wallpaperengine&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews" />
-    <a href="https://github.com/Almamu/linux-wallpaperengine/pulse"><img src="https://img.shields.io/endpoint?url=https://ghloc.vercel.app/api/Almamu/linux-wallpaperengine/badge?filter=.cpp$,.h$&style=flat&logoColor=white&label=Lines of Code" /></a>
-	<a href="https://www.codefactor.io/repository/github/almamu/linux-wallpaperengine"><img src="https://img.shields.io/codefactor/grade/github/Almamu/linux-wallpaperengine" /></a>
-	<a href="https://github.com/Almamu/linux-wallpaperengine/graphs/commit-activity"><img src="https://img.shields.io/github/commit-activity/m/Almamu/linux-wallpaperengine" /></a>
-	<a href="https://github.com/Almamu/linux-wallpaperengine/graphs/contributors"><img src="https://img.shields.io/github/contributors/Almamu/linux-wallpaperengine" /></a>
-	<a href="https://github.com/Almamu/linux-wallpaperengine/issues"><img src="https://img.shields.io/github/issues-raw/Almamu/linux-wallpaperengine" /></a>
-	<a href="https://github.com/Almamu/linux-wallpaperengine/issues?q=is%3Aissue+is%3Aopen+label%3A%22help%20wanted%22"><img src="https://img.shields.io/github/issues/Almamu/linux-wallpaperengine/help%20wanted?color=green" alt="help wanted"></a>
-    <a href="https://wpengine.alma.mu/"><img src="https://img.shields.io/badge/showcase_gallery-blue" alt="Showcase gallery" /></a>
-    <a href="https://deepwiki.com/Almamu/linux-wallpaperengine"><img src="https://img.shields.io/badge/Deepwiki-Almamu%2Flinux--wallpaperengine-blue?logo=data%3Aimage%2Fpng%3Bbase64%2CiVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK%2FAIi%2BQuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06%2Fuv1saEDv4O3n3dV60RfP947Mm9%2FSQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH%2F%2FPB8mnKqScAhsD0kYP3j%2FYt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY%2F56ebRWeraTjMt%2F00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ%2BfXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB%2FimwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE%2BgO0SsWmPiXB%2Bjikdf6SizrT5qKasx5j8ABbHpFTx%2BvFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa%2BAx283gghmj%2Bvj7feE2KBBRMW3FzOpLOADl0Isb5587h%2FU4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5%2FXFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb%2FvA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU%2B3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26%2FHfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr%2FFGaKiG%2BT%2Bv%2BTQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r%2FcKaoqr%2B27%2FXcrS5UwSMbQAAAABJRU5ErkJggg%3D%3D" alt="DeepWiki documentation" /></a>
-</p>
+# The Best Linux WallpaperEngine
 
-# 🖼️ Linux Wallpaper Engine
+A fork of [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine)
+with a [GNOME 42 Wayland extension](packaging/gnome/README.md) and
+[reviewed bug fixes](docs/fork-fixes.md). Original project credits and license are preserved.
+
+Build this fork from source to get these changes; distribution/AUR packages below
+refer to the upstream project. The executable is still named `linux-wallpaperengine`.
 
 Bring **Wallpaper Engine**-style live wallpapers to Linux! This project allows you to run animated wallpapers from Steam’s Wallpaper Engine right on your desktop.
 
@@ -25,6 +18,7 @@ Bring **Wallpaper Engine**-style live wallpapers to Linux! This project allows y
 To compile and run this, you'll need:
 
 - OpenGL 3.3 support
+- fmt development library (used for GCC 11 compatibility)
 - CMake
 - LZ4, Zlib
 - SDL2
@@ -41,13 +35,13 @@ Install the required dependencies on Ubuntu/Debian-based systems:
 ### Ubuntu 22.04
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential cmake libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev libglew-dev freeglut3-dev libsdl2-dev liblz4-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libxxf86vm-dev libglm-dev libglfw3-dev libmpv-dev mpv libmpv1 libpulse-dev libpulse0 libfftw3-dev libfreetype-dev
+sudo apt-get install build-essential cmake libfmt-dev libgmp-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev libglew-dev freeglut3-dev libsdl2-dev liblz4-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libxxf86vm-dev libglm-dev libglfw3-dev libmpv-dev mpv libmpv1 libpulse-dev libpulse0 libfftw3-dev libfreetype-dev
 ```
 
 ### Ubuntu 24.04
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential cmake libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev libglew-dev freeglut3-dev libsdl2-dev liblz4-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libxxf86vm-dev libglm-dev libglfw3-dev libmpv-dev mpv libmpv2 libpulse-dev libpulse0 libfftw3-dev libfreetype-dev
+sudo apt-get install build-essential cmake libfmt-dev libgmp-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev libglew-dev freeglut3-dev libsdl2-dev liblz4-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libxxf86vm-dev libglm-dev libglfw3-dev libmpv-dev mpv libmpv2 libpulse-dev libpulse0 libfftw3-dev libfreetype-dev
 ```
 
 ### Alt linux
@@ -61,7 +55,7 @@ Install the required dependencies on RHEL/Fedora-based systems:
 ### Fedora 42
 ```bash
 sudo dnf update
-sudo dnf install gcc g++ cmake libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel mesa-libGL-devel glew-devel freeglut-devel SDL2-devel lz4-devel ffmpeg ffmpeg-free-devel libXxf86vm-devel glm-devel glfw-devel mpv mpv-devel pulseaudio-libs-devel fftw-devel gmp-devel
+sudo dnf install gcc g++ cmake fmt-devel gmp-devel libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel mesa-libGL-devel glew-devel freeglut-devel SDL2-devel lz4-devel ffmpeg ffmpeg-free-devel libXxf86vm-devel glm-devel glfw-devel mpv mpv-devel pulseaudio-libs-devel fftw-devel gmp-devel
 ```
 
 ---
@@ -126,8 +120,8 @@ linux-wallpaperengine --assets-dir /path/to/assets
 Clone the repo:
 
 ```bash
-git clone --recurse-submodules https://github.com/Almamu/linux-wallpaperengine.git
-cd linux-wallpaperengine
+git clone --recurse-submodules https://github.com/e493956170-cmd/the-best-linux-wallpaperengine.git
+cd the-best-linux-wallpaperengine
 ```
 
 Build it:
