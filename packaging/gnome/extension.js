@@ -7,6 +7,7 @@ const UnlockDialog = imports.ui.unlockDialog;
 const ExtensionUtils = imports.misc.extensionUtils;
 
 class WallpaperExtension {
+    /** Connect lifecycle signals and install desktop and lock background support. */
     enable() {
         if (!Meta.is_wayland_compositor())
             throw new Error('The wallpaper extension requires a Wayland session');
@@ -14,6 +15,7 @@ class WallpaperExtension {
         this._enabled = true;
         this._signals = [];
         this._renderers = new Map();
+        this._recoveryId = 0;
         this._lockBackgrounds = new Map();
         this._settings = ExtensionUtils.getSettings();
         this._connect(global.window_manager, 'map', (_wm, actor) => this._attach(actor));
@@ -36,14 +38,17 @@ class WallpaperExtension {
             this._launch();
     }
 
+    /** Track a signal connection so disable can disconnect it. */
     _connect(object, signal, callback) {
         this._signals.push([object, object.connect(signal, callback)]);
     }
 
+    /** Include the transition into the unlock dialog before the locked flag changes. */
     _isLocked() {
         return Main.sessionMode.currentMode === 'unlock-dialog' || Main.screenShield.locked;
     }
 
+    /** Start the desktop renderer and rebuild any existing lock backgrounds. */
     _launch() {
         if (!this._enabled || !Main.layoutManager.primaryMonitor)
             return;
@@ -55,6 +60,7 @@ class WallpaperExtension {
         this._updatePause();
     }
 
+    /** Build a muted native-window command without invoking a shell. */
     _rendererCommand(wallpaper, monitor) {
         const executable = GLib.find_program_in_path(this._settings.get_string('engine-path'));
         if (!executable) {
@@ -74,6 +80,7 @@ class WallpaperExtension {
         return argv;
     }
 
+    /** Reuse identical projects or spawn a native client and reap it asynchronously. */
     _ensureRenderer(wallpaper, monitor) {
         if (!wallpaper)
             return null;
@@ -95,6 +102,9 @@ class WallpaperExtension {
             launcher.close();
         }
         this._renderers.set(wallpaper, renderer);
+        // A desktop project requested by a lock monitor must retain its desktop role.
+        if (wallpaper === this._settings.get_string('wallpaper'))
+            this._desktop = renderer;
         // Keep the native client alive until its child has been reaped, even on disable.
         renderer.process.wait_async(null, (source, result) => {
             source.wait_finish(result);
@@ -106,12 +116,32 @@ class WallpaperExtension {
             if (this._renderers.get(wallpaper) !== renderer)
                 return;
             this._renderers.delete(wallpaper);
+            if (renderer === this._desktop)
+                this._desktop = null;
             this._clearWindow(renderer);
+            for (const binding of this._lockBackgrounds.values()) {
+                if (binding.renderer === renderer)
+                    binding.renderer = null;
+            }
+            this._scheduleRecovery();
             log('linux-wallpaperengine: renderer exited');
         });
         return renderer;
     }
 
+    /** Retry failed playback after a delay, using current settings and lock bindings. */
+    _scheduleRecovery() {
+        if (!this._enabled || this._recoveryId)
+            return;
+        this._recoveryId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+            this._recoveryId = 0;
+            if (this._enabled)
+                this._launch();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    /** Clone only an owned native window, keeping the source minimized. */
     _attach(actor) {
         const window = actor.meta_window;
         const renderer = [...this._renderers.values()].find(candidate =>
@@ -148,6 +178,7 @@ class WallpaperExtension {
         this._updatePause();
     }
 
+    /** Wrap per-monitor background creation while preserving GNOME authentication UI. */
     _installLockBackgrounds() {
         const extension = this;
         this._originalCreateBackground = UnlockDialog.UnlockDialog.prototype._createBackground;
@@ -159,6 +190,7 @@ class WallpaperExtension {
         UnlockDialog.UnlockDialog.prototype._createBackground = this._createBackground;
     }
 
+    /** Select the configured project or desktop fallback for one lock monitor. */
     _bindLockBackground(widget, monitorIndex) {
         const monitor = Main.layoutManager.monitors[monitorIndex];
         const wallpapers = this._settings.get_strv('lock-wallpapers');
@@ -174,6 +206,7 @@ class WallpaperExtension {
         this._updatePause();
     }
 
+    /** Add an optional mirrored surface while keeping the widget blur effect. */
     _cloneLockBackground(binding) {
         if (binding.clone)
             return;
@@ -192,6 +225,7 @@ class WallpaperExtension {
             background.hide();
     }
 
+    /** Update lock settings without restarting desktop playback. */
     _refreshLockBackgrounds() {
         for (const renderer of this._renderers.values()) {
             if (renderer !== this._desktop)
@@ -203,6 +237,7 @@ class WallpaperExtension {
         this._updatePause();
     }
 
+    /** Stop lock-only renderers after unlock and recompute visibility. */
     _syncSession() {
         if (!this._isLocked()) {
             for (const renderer of this._renderers.values()) {
@@ -213,6 +248,7 @@ class WallpaperExtension {
         this._updatePause();
     }
 
+    /** Suspend mapped renderers only when manually paused or unused. */
     _updatePause() {
         const locked = this._isLocked();
         const monitors = Main.layoutManager.monitors;
@@ -236,6 +272,7 @@ class WallpaperExtension {
         }
     }
 
+    /** Destroy owned clones and restore the original lock background actors. */
     _clearWindow(renderer) {
         for (const [object, id] of renderer.signals)
             object.disconnect(id);
@@ -256,6 +293,7 @@ class WallpaperExtension {
         renderer.window = null;
     }
 
+    /** Terminate and reap one renderer, forcing exit after a bounded grace period. */
     _stopRenderer(renderer) {
         this._renderers.delete(renderer.wallpaper);
         if (renderer.paused)
@@ -272,12 +310,18 @@ class WallpaperExtension {
         this._clearWindow(renderer);
     }
 
+    /** Stop all renderers before restart or disable. */
     _stop() {
+        if (this._recoveryId) {
+            GLib.source_remove(this._recoveryId);
+            this._recoveryId = 0;
+        }
         for (const renderer of this._renderers.values())
             this._stopRenderer(renderer);
         this._desktop = null;
     }
 
+    /** Recreate playback with the current settings and monitor layout. */
     _restart() {
         if (!this._enabled || Main.layoutManager._startingUp)
             return;
@@ -285,6 +329,7 @@ class WallpaperExtension {
         this._launch();
     }
 
+    /** Restore the background hook, disconnect signals and stop owned processes. */
     disable() {
         this._enabled = false;
         for (const [object, id] of this._signals)
@@ -303,6 +348,7 @@ class WallpaperExtension {
     }
 }
 
+/** Create the extension instance for GNOME Shell. */
 function init() {
     return new WallpaperExtension();
 }

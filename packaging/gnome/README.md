@@ -84,6 +84,8 @@ extension errors. An empty wallpaper setting intentionally starts no process.
 the original stays minimized and hidden from the window list. The extension owns
 the renderer processes and sends SIGSTOP/SIGCONT for pause, and SIGTERM on disable.
 If a hidden client does not exit within five seconds, it is forcibly stopped.
+Unexpected renderer exits are retried after five seconds; active lock backgrounds
+are rebound and desktop playback retains its role after unlocking.
 It resumes a stopped child before terminating it. Monitor changes restart playback
 using the updated monitor layout. The source window uses the primary monitor
 size; its image is scaled to fit each monitor.
