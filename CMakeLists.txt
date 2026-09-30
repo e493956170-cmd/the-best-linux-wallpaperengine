@@ -37,6 +37,7 @@ find_package(LZ4 REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(PulseAudio REQUIRED)
 find_package(Freetype REQUIRED)
+find_package(fmt CONFIG REQUIRED)
 
 set(ENABLE_OPT OFF)
 set(SPIRV_CROSS_FORCE_PIC ON)
@@ -586,6 +587,7 @@ target_link_libraries (linux-wallpaperengine-lib PUBLIC
     ${MPV_LIBRARY}
     ${PULSEAUDIO_LIBRARY}
     Freetype::Freetype
+    fmt::fmt
     ${WAYLAND_LIBRARIES}
     ${X11_LIBRARIES}
     ${DBUS_LIBRARIES}
@@ -602,6 +604,7 @@ target_link_libraries (linux-wallpaperengine-lib PUBLIC
 if (BUILD_TESTING)
     target_link_libraries (tests PRIVATE
         Catch2::Catch2WithMain
+        fmt::fmt
         ${OPENGL_LIBRARIES}
         GLEW::GLEW
         ${GLUT_LIBRARIES}

@@ -1,8 +1,11 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
+#include <optional>
 #include <string>
 
 namespace WallpaperEngine::Media {
