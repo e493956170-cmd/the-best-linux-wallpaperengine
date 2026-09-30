@@ -18,10 +18,13 @@ SOURCE = Path(__file__).resolve().parent
 PROBE_UUID = 'wallpaper-test-probe@local.test'
 # Installed only inside the disposable session. This exposes no unlock method.
 TEST_PROBE = """
-const {Gio} = imports.gi;
+const {Clutter, Gio, GLib} = imports.gi;
 const Main = imports.ui.main;
 const XML = `<node><interface name="org.gnome.WallpaperTestProbe">
 <method name="Wake"/><method name="ShowPrompt"/><method name="Lock"/><method name="RestackStatic"/>
+<method name="Click"><arg type="i" direction="in"/><arg type="i" direction="in"/><arg type="b" direction="in"/><arg type="i" direction="in"/></method>
+<method name="Move"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+<method name="FocusTestWindow"/>
 <method name="GetState"><arg type="s" direction="out"/></method>
 </interface></node>`;
 class Probe {
@@ -36,12 +39,27 @@ class Probe {
             finally { this._loginSession = session; }
         };
         shield._setLocked = this._setLocked;
+        this._pointer = Clutter.get_default_backend().get_default_seat()
+            .create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
         this._wakeCount = 0;
         this._wakeId = Main.screenShield.connect('wake-up-screen', () => this._wakeCount++);
         this._object = Gio.DBusExportedObject.wrapJSObject(XML, this);
         this._object.export(Gio.DBus.session, '/org/gnome/WallpaperTestProbe');
         this._owner = Gio.bus_own_name_on_connection(Gio.DBus.session,
             'org.gnome.WallpaperTestProbe', Gio.BusNameOwnerFlags.NONE, null, null);
+    }
+    FocusTestWindow() {
+        const window = global.get_window_actors().map(actor => actor.meta_window)
+            .find(window => window.get_title() === 'Wallpaper focus test');
+        const monitor = Main.layoutManager.primaryMonitor;
+        window.move_resize_frame(false, monitor.x + 200, monitor.y + 200, 480, 320);
+        window.activate(global.get_current_time());
+    }
+    Move(x, y) { this._pointer.notify_absolute_motion(GLib.get_monotonic_time(), x, y); }
+    Click(x, y, pressed, button) {
+        this.Move(x, y);
+        this._pointer.notify_button(GLib.get_monotonic_time(), button,
+            pressed ? Clutter.ButtonState.PRESSED : Clutter.ButtonState.RELEASED);
     }
     RestackStatic() {
         // Model a secondary static background restacked during a display transition.
@@ -58,6 +76,20 @@ class Probe {
     GetState() {
         const dialog = Main.screenShield._dialog;
         return JSON.stringify({
+            focus: global.display.focus_window ? global.display.focus_window.get_title() : null,
+            windows: global.get_window_actors().map(actor => ({
+                title: actor.meta_window.get_title(), minimized: actor.meta_window.minimized,
+            })),
+            picked: (() => {
+                const [x, y] = global.get_pointer();
+                const names = [];
+                let actor = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y);
+                while (actor) {
+                    names.push(actor.constructor.name);
+                    actor = actor.get_parent();
+                }
+                return names;
+            })(),
             mode: Main.sessionMode.currentMode,
             locked: Main.screenShield.locked,
             blank: Main.screenShield._shortLightbox.active || Main.screenShield._longLightbox.active,
@@ -78,6 +110,7 @@ class Probe {
         if (Main.screenShield._setLocked === this._setLocked)
             Main.screenShield._setLocked = this._originalSetLocked;
         Main.screenShield.disconnect(this._wakeId);
+        this._pointer = null;
         this._object.unexport();
         Gio.bus_unown_name(this._owner);
     }
@@ -168,8 +201,11 @@ def run_test(args):
     setting('wallpaper', json.dumps(str(args.wallpaper)))
     setting('assets-dir', json.dumps(str(args.assets_dir)) if args.assets_dir else "''")
     subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'enabled-extensions',
-                    json.dumps([args.uuid, PROBE_UUID])], check=True)
+                    json.dumps([args.uuid, PROBE_UUID] + (['ding@rastersoft.com'] if args.desktop_icons else []))], check=True)
     subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'disabled-extensions', '[]'], check=True)
+    if args.desktop_icons:
+        for key, value in [('start-corner', 'top-left'), ('show-home', 'false'), ('show-trash', 'false')]:
+            subprocess.run(['gsettings', 'set', 'org.gnome.shell.extensions.ding', key, value], check=True)
 
     with (args.output / 'gnome-shell.log').open('w') as log:
         shell = subprocess.Popen([
@@ -221,6 +257,8 @@ def run_test(args):
                 differences.append(difference)
             print('PASS: composited background frames change on every monitor', flush=True)
 
+            if args.desktop_clicks:
+                test_desktop_clicks(args, connection, geometries)
             if args.lock_lifecycle:
                 test_lock_lifecycle(args, connection, setting, screenshot, crop_monitor)
             setting('paused', 'true')
@@ -302,10 +340,85 @@ Gtk.main()
                 'passed': True, 'monitor_count': args.monitors,
                 'background_difference_rgb': differences,
                 'lock_screen_tested': bool(args.lock_wallpaper),
+                'desktop_clicks_tested': args.desktop_clicks,
+                'desktop_icons_tested': bool(args.desktop_icons),
                 'environment': 'isolated headless GNOME 42; functional test only',
             }, indent=2) + '\n')
         finally:
             stop_test_session(shell, extension, renderer)
+
+
+def test_desktop_clicks(args, connection, geometries):
+    """Inject pointer clicks on both backgrounds and verify the foreground stays focused."""
+    from gi.repository import Gio, GLib
+
+    def probe(method, parameters=None):
+        """Call input helpers on the disposable compositor only."""
+        return connection.call_sync('org.gnome.WallpaperTestProbe', '/org/gnome/WallpaperTestProbe',
+                                    'org.gnome.WallpaperTestProbe', method, parameters, None,
+                                    Gio.DBusCallFlags.NONE, 5000, None).unpack()
+
+    code = """
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+window = Gtk.Window(title='Wallpaper focus test')
+window.set_default_size(480, 320)
+window.show_all()
+Gtk.main()
+"""
+    process = subprocess.Popen([sys.executable, '-c', code])
+    states = []
+    try:
+        wait_for(lambda: any(window['title'] == 'Wallpaper focus test'
+                            for window in json.loads(probe('GetState')[0])['windows']))
+        for geometry in geometries:
+            probe('FocusTestWindow')
+            wait_for(lambda: json.loads(probe('GetState')[0])['focus'] == 'Wallpaper focus test')
+            x, y = geometry.x + geometry.width - 100, geometry.y + geometry.height - 100
+            probe('Click', GLib.Variant('(iibi)', (x, y, True, 1)))
+            time.sleep(0.1)
+            probe('Click', GLib.Variant('(iibi)', (x, y, False, 1)))
+            time.sleep(1)
+            states.append(json.loads(probe('GetState')[0]))
+        (args.output / 'desktop-clicks.json').write_text(json.dumps(states, indent=2))
+        assert all(state['focus'] == 'Wallpaper focus test' for state in states), states
+        assert all(not window['minimized'] for state in states for window in state['windows']
+                   if window['title'] == 'Wallpaper focus test'), states
+        print('PASS: clicking either desktop preserves foreground application focus', flush=True)
+        if args.desktop_icons:
+            geometry = geometries[0]
+            # Icon selection and rubber-band selection must keep desktop keyboard focus.
+            for kind, x, y in [('icon', geometry.x + 60, geometry.y + 70),
+                               ('drag', geometry.x + 1200, geometry.y + 900)]:
+                probe('FocusTestWindow')
+                wait_for(lambda: json.loads(probe('GetState')[0])['focus'] == 'Wallpaper focus test')
+                probe('Click', GLib.Variant('(iibi)', (x, y, True, 1)))
+                time.sleep(0.2)
+                if kind == 'drag':
+                    x += 100
+                    probe('Move', GLib.Variant('(ii)', (x, y)))
+                    time.sleep(0.2)
+                probe('Click', GLib.Variant('(iibi)', (x, y, False, 1)))
+                time.sleep(1)
+                state = json.loads(probe('GetState')[0])
+                assert state['focus'] and state['focus'].startswith('@!'), (kind, state)
+                # A subsequent blank click must not revive a stale application focus.
+                for pressed in (True, False):
+                    probe('Click', GLib.Variant('(iibi)', (geometry.x + 1600, y, pressed, 1)))
+                    time.sleep(0.1)
+                time.sleep(1)
+                assert json.loads(probe('GetState')[0])['focus'] == state['focus'], kind
+            probe('FocusTestWindow')
+            for pressed in (True, False):
+                probe('Click', GLib.Variant('(iibi)', (geometry.x + 1600, 900, pressed, 3)))
+                time.sleep(0.1)
+            time.sleep(1)
+            assert json.loads(probe('GetState')[0])['focus'] != 'Wallpaper focus test'
+            print('PASS: desktop icon selection, dragging and context menu retain desktop focus', flush=True)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
 
 
 def set_test_primary(connection, index):
@@ -544,13 +657,15 @@ def main():
     parser.add_argument('--assets-dir', type=Path)
     parser.add_argument('--lock-wallpaper', type=Path)
     parser.add_argument('--lock-lifecycle', action='store_true')
+    parser.add_argument('--desktop-clicks', action='store_true')
+    parser.add_argument('--desktop-icons', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--monitors', type=int, choices=(1, 2), default=1)
     parser.add_argument('--isolated', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    for name in ('result.json', 'lock-result.json', 'lifecycle-result.json'):
+    for name in ('result.json', 'lock-result.json', 'lifecycle-result.json', 'desktop-clicks.json'):
         (args.output / name).unlink(missing_ok=True)
     args.extension_source = args.extension_source.resolve(strict=True)
     metadata = json.loads((args.extension_source / 'metadata.json').read_text())
@@ -574,6 +689,15 @@ def main():
             path = root / name
             path.mkdir(mode=0o700)
             env[key] = str(path)
+        if args.desktop_icons:
+            icons = root / 'data/gnome-shell/extensions/ding@rastersoft.com'
+            icons.mkdir(parents=True)
+            for source in args.desktop_icons.resolve(strict=True).iterdir():
+                (icons / source.name).symlink_to(source)
+            desktop = root / 'desktop'
+            desktop.mkdir()
+            (desktop / 'focus-test.txt').write_text('Desktop click fixture\n')
+            (root / 'config/user-dirs.dirs').write_text('XDG_DESKTOP_DIR="%s"\n' % desktop)
         probe_dir = root / 'data/gnome-shell/extensions' / PROBE_UUID
         probe_dir.mkdir(parents=True)
         (probe_dir / 'extension.js').write_text(TEST_PROBE)
@@ -596,6 +720,10 @@ def main():
         command = ['dbus-run-session', '--', sys.executable, str(Path(__file__).resolve()),
                    '--isolated', '--extension-source', str(args.extension_source), '--engine', str(args.engine), '--wallpaper', str(args.wallpaper),
                    '--output', str(args.output), '--monitors', str(args.monitors)]
+        if args.desktop_icons:
+            command.extend(['--desktop-icons', str(args.desktop_icons)])
+        if args.desktop_clicks:
+            command.append('--desktop-clicks')
         if args.lock_lifecycle:
             command.append('--lock-lifecycle')
         if args.lock_wallpaper:

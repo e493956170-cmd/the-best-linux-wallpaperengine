@@ -1,0 +1,103 @@
+--- a/extension.js
++++ b/extension.js
+@@ -133,6 +133,20 @@
+         updateDesktopGeometry();
+     });
+ 
++    // Keep the application that was focused before a desktop background click.
++    data.previousFocusWindow = global.display.focus_window;
++    data.desktopReturnFocus = null;
++    data.focusChangedId = global.display.connect('notify::focus-window', () => {
++        const window = global.display.focus_window;
++        if (window && window.customJS_ding && window.customJS_ding.keepAtBottom) {
++            const previous = data.previousFocusWindow;
++            if (previous && !previous.customJS_ding)
++                data.desktopReturnFocus = previous;
++        } else {
++            data.desktopReturnFocus = null;
++        }
++        data.previousFocusWindow = window;
++    });
+     data.isEnabled = true;
+     if (data.launchDesktopId) {
+         GLib.source_remove(data.launchDesktopId);
+@@ -166,6 +180,20 @@
+         doCopy.connect('activate', manageCutCopy);
+         doCut.connect('activate', manageCutCopy);
+         data.actionGroup = new Gio.SimpleActionGroup();
++        const restoreAppFocus = new Gio.SimpleAction({name: 'restoreAppFocus', parameter_type: new GLib.VariantType('b')});
++        restoreAppFocus.connect('activate', (_action, parameter) => {
++            const desktop = global.display.focus_window;
++            const previous = data.desktopReturnFocus;
++            data.desktopReturnFocus = null;
++            if (!parameter.get_boolean() || !desktop || !desktop.customJS_ding || !desktop.customJS_ding.keepAtBottom ||
++                !previous || !previous.get_compositor_private() || previous.minimized ||
++                !previous.located_on_workspace(global.workspace_manager.get_active_workspace()) ||
++                Main.screenShield.locked || Main.overview.visible)
++                return;
++            // Focus only: do not raise, unminimize or switch workspaces.
++            previous.focus(global.get_current_time());
++        });
++        data.actionGroup.add_action(restoreAppFocus);
+         data.actionGroup.add_action(doCopy);
+         data.actionGroup.add_action(doCut);
+         data.actionGroup.add_action(desktopGeometry);
+@@ -231,6 +259,12 @@
+ 
+     DesktopIconsUsableArea = null;
+     data.isEnabled = false;
++    if (data.focusChangedId) {
++        global.display.disconnect(data.focusChangedId);
++        data.focusChangedId = 0;
++    }
++    data.previousFocusWindow = null;
++    data.desktopReturnFocus = null;
+     killCurrentProcess();
+     data.GnomeShellOverride.disable();
+     data.x11Manager.disable();
+--- a/desktopManager.js
++++ b/desktopManager.js
+@@ -583,6 +583,7 @@
+                 this.unselectAll();
+             }
+             this._startRubberband(x, y);
++            this._restoreAppFocus = !shiftPressed && !controlPressed;
+         }
+         if (button == 3) {
+             let templates = this.templatesMonitor.createMenu();
+@@ -1006,6 +1007,10 @@
+ 
+     onMotion(x, y) {
+         if (this.rubberBand) {
++            const threshold = Gtk.Settings.get_default().gtk_dnd_drag_threshold;
++            if (Math.abs(x - this.rubberBandInitX) > threshold ||
++                Math.abs(y - this.rubberBandInitY) > threshold)
++                this._restoreAppFocus = false;
+             this.x1 = Math.min(x, this.rubberBandInitX);
+             this.x2 = Math.max(x, this.rubberBandInitX);
+             this.y1 = Math.min(y, this.rubberBandInitY);
+@@ -1030,7 +1035,14 @@
+         return false;
+     }
+ 
++    clearAppFocus() {
++        DBusUtils.extensionControl.activate_action('restoreAppFocus', new GLib.Variant('b', false));
++    }
++
+     onReleaseButton(grid) {
++        const restore = !!this.rubberBand && !!this._restoreAppFocus && this.getNumberOfSelectedItems() === 0;
++        DBusUtils.extensionControl.activate_action('restoreAppFocus', new GLib.Variant('b', restore));
++        this._restoreAppFocus = false;
+         if (this.rubberBand) {
+             this.rubberBand = false;
+             this.selectionRectangle = null;
+--- a/desktopIconItem.js
++++ b/desktopIconItem.js
+@@ -297,6 +297,7 @@
+     }
+ 
+     _onPressButton(actor, event) {
++        this._desktopManager.clearAppFocus();
+         this._updateClickState(event);
+         let button = event.get_button()[1];
+         let [a, x, y] = event.get_coords();

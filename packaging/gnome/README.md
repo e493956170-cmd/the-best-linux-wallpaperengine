@@ -134,3 +134,6 @@ Use `--lock-lifecycle` with `--monitors 2` to exercise the real lock entry with 
 right-hand primary monitor, repeated unlocks, clear video, keep-awake requests,
 and static-background restacking. The probe isolates logind lock hints from the
 host session. Virtual outputs cannot verify physical monitor DPMS behavior.
+
+On Ubuntu 22.04, if clicking empty desktop space moves keyboard focus away from
+the foreground application, see the optional [DING compatibility patch](compat/README.md).
