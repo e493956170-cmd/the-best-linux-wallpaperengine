@@ -5,6 +5,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -45,6 +47,9 @@ def run_test(args):
             '--method', 'org.gnome.Shell.Extensions.' + method, UUID], text=True)
 
     def renderer():
+        returncode = shell.poll()
+        if returncode is not None:
+            raise AssertionError('gnome-shell exited with code %s' % returncode)
         children = Path('/proc/%d/task/%d/children' % (shell.pid, shell.pid))
         if not children.exists():
             return None
@@ -61,6 +66,12 @@ def run_test(args):
         # Fields after comm start with state (field 3); comm can contain spaces.
         fields = Path('/proc/%d/stat' % pid).read_text().rsplit(')', 1)[1].split()
         return fields[0], int(fields[11]) + int(fields[12])
+
+    def wait_until_paused(pid, paused):
+        wait_for(lambda: (usage(pid)[0] == 'T') == paused)
+
+    def wait_until_exited(pid):
+        wait_for(lambda: not Path('/proc/%d' % pid).exists())
 
     setting('engine-path', json.dumps(str(args.engine)))
     setting('wallpaper', json.dumps(str(args.wallpaper)))
@@ -140,9 +151,9 @@ Gtk.main()
 
             for paused in (False, True):
                 setting('paused', 'true' if paused else 'false')
-                wait_for(lambda: (usage(pid)[0] == 'T') == paused)
+                wait_until_paused(pid, paused)
                 assert 'true' in extension('DisableExtension')
-                wait_for(lambda: not Path('/proc/%d' % pid).exists())
+                wait_until_exited(pid)
                 setting('paused', 'false')
                 assert 'true' in extension('EnableExtension')
                 pid = wait_for(renderer)
@@ -158,6 +169,17 @@ Gtk.main()
                 try:
                     extension('DisableExtension')
                 finally:
+                    # A renderer stuck during startup may not handle SIGTERM. Only
+                    # kill a child still owned by this test's compositor.
+                    deadline = time.monotonic() + 5
+                    while renderer() and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    child = renderer()
+                    if child:
+                        try:
+                            os.kill(child, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                     shell.terminate()
                     try:
                         shell.wait(timeout=10)
@@ -211,8 +233,14 @@ def main():
         try:
             subprocess.run(command, env=env, check=True)
         finally:
-            # The document portal can outlive the session bus briefly during shutdown.
-            wait_for(lambda: not os.path.ismount(root / 'runtime/doc'))
+            # Portal/GVfs mounts can outlive the private session bus. Detach only
+            # mounts inside this test's runtime directory before removing it.
+            prefix = str(root / 'runtime') + '/'
+            mounts = [line.split()[4] for line in Path('/proc/self/mountinfo').read_text().splitlines()
+                      if line.split()[4].startswith(prefix)]
+            for mount in sorted(mounts, key=len, reverse=True):
+                unmount = shutil.which('fusermount3') or shutil.which('fusermount')
+                subprocess.run([unmount, '-uz', mount], check=True)
 
 
 if __name__ == '__main__':
