@@ -8,7 +8,8 @@ Currently supported: **GNOME Shell 42 on Wayland**. A single renderer shows the 
 all monitors. Playback is muted and mouse interaction is disabled. A fullscreen
 window hides the background on its monitor; playback pauses when every monitor
 is covered. Lock screen backgrounds can use different projects on each monitor,
-while keeping GNOME's blur, clock and password prompt. Disabling the extension stops its renderers and reveals
+while keeping GNOME's clock and password prompt. Dynamic backgrounds are shown
+without the blur that GNOME applies to still wallpapers. Disabling the extension stops its renderers and reveals
 the original background without changing GNOME's wallpaper settings.
 
 ## Install
@@ -64,7 +65,15 @@ Configure lock backgrounds in GNOME monitor index order (0, 1, ...):
 gsettings --schemadir "$schema_dir" set "$schema" lock-wallpapers "['/absolute/path/to/first-project', '/absolute/path/to/second-project']"
 # Optional horizontal mirroring per monitor:
 gsettings --schemadir "$schema_dir" set "$schema" lock-mirrors '[false, true]'
+# Keep the locked display on instead of GNOME's immediate fade/blank:
+gsettings --schemadir "$schema_dir" set "$schema" keep-lock-screen-on true
 ```
+
+`keep-lock-screen-on` defaults to false. When enabled, the extension suppresses
+the lock fade and sends GNOME's display-wake signal every ten seconds while
+locked. Unlocking or disabling the extension stops those requests. Authentication
+and automatic locking remain managed by GNOME. Avoid enabling another extension
+that also replaces `UnlockDialog` backgrounds.
 
 An empty list or empty entry uses the desktop wallpaper. Identical project values
 share one renderer, including the desktop project; different values start separate
@@ -86,7 +95,7 @@ the renderer processes and sends SIGSTOP/SIGCONT for pause, and SIGTERM on disab
 If a hidden client does not exit within five seconds, it is forcibly stopped.
 Unexpected renderer exits are retried after five seconds; active lock backgrounds
 are rebound and desktop playback retains its role after unlocking.
-It resumes a stopped child before terminating it. Monitor changes restart playback
+It resumes a stopped child before terminating it. Unlocking rebuilds every desktop clone above the static backgrounds. Monitor changes restart playback
 using the updated monitor layout. The source window uses the primary monitor
 size; its image is scaled to fit each monitor.
 
@@ -120,3 +129,8 @@ visible, manual pause, unlock cleanup, repeated activation, and disable/re-enabl
 while the shield is present. The isolated test activates the real GNOME screen
 shield with a test-only probe; it does not validate password authentication.
 Regular desktop performance and mixed-scale multi-monitor behavior still need testing.
+
+Use `--lock-lifecycle` with `--monitors 2` to exercise the real lock entry with a
+right-hand primary monitor, repeated unlocks, clear video, keep-awake requests,
+and static-background restacking. The probe isolates logind lock hints from the
+host session. Virtual outputs cannot verify physical monitor DPMS behavior.

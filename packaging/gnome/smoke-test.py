@@ -21,16 +21,35 @@ TEST_PROBE = """
 const {Gio} = imports.gi;
 const Main = imports.ui.main;
 const XML = `<node><interface name="org.gnome.WallpaperTestProbe">
-<method name="Wake"/><method name="ShowPrompt"/>
+<method name="Wake"/><method name="ShowPrompt"/><method name="Lock"/><method name="RestackStatic"/>
 <method name="GetState"><arg type="s" direction="out"/></method>
 </interface></node>`;
 class Probe {
     enable() {
+        const shield = Main.screenShield;
+        const original = shield._setLocked;
+        this._originalSetLocked = original;
+        this._setLocked = function (locked) {
+            const session = this._loginSession;
+            this._loginSession = null;
+            try { original.call(this, locked); }
+            finally { this._loginSession = session; }
+        };
+        shield._setLocked = this._setLocked;
+        this._wakeCount = 0;
+        this._wakeId = Main.screenShield.connect('wake-up-screen', () => this._wakeCount++);
         this._object = Gio.DBusExportedObject.wrapJSObject(XML, this);
         this._object.export(Gio.DBus.session, '/org/gnome/WallpaperTestProbe');
         this._owner = Gio.bus_own_name_on_connection(Gio.DBus.session,
             'org.gnome.WallpaperTestProbe', Gio.BusNameOwnerFlags.NONE, null, null);
     }
+    RestackStatic() {
+        // Model a secondary static background restacked during a display transition.
+        const index = Main.layoutManager.monitors.findIndex(m => m.index !== Main.layoutManager.primaryIndex);
+        const actor = Main.layoutManager._bgManagers[index].backgroundActor;
+        Main.layoutManager._backgroundGroup.set_child_above_sibling(actor, null);
+    }
+    Lock() { Main.screenShield.lock(true); }
     Wake() {
         Main.screenShield._longLightbox.lightOff();
         Main.screenShield._shortLightbox.lightOff();
@@ -40,11 +59,25 @@ class Probe {
         const dialog = Main.screenShield._dialog;
         return JSON.stringify({
             mode: Main.sessionMode.currentMode,
+            locked: Main.screenShield.locked,
+            blank: Main.screenShield._shortLightbox.active || Main.screenShield._longLightbox.active,
+            wakeCount: this._wakeCount,
+            blur: dialog ? dialog._backgroundGroup.get_children().map(widget => {
+                const effect = widget.get_effect('blur');
+                return effect ? effect.enabled : false;
+            }) : [],
+            desktop: Main.layoutManager._backgroundGroup.get_children().map(actor => ({
+                type: actor.constructor.name, visible: actor.visible,
+                x: actor.x, y: actor.y, width: actor.width, height: actor.height,
+            })),
             backgrounds: dialog ? dialog._backgroundGroup.get_n_children() : 0,
             promptVisible: dialog ? dialog._promptBox.visible : false,
         });
     }
     disable() {
+        if (Main.screenShield._setLocked === this._setLocked)
+            Main.screenShield._setLocked = this._originalSetLocked;
+        Main.screenShield.disconnect(this._wakeId);
         this._object.unexport();
         Gio.bus_unown_name(this._owner);
     }
@@ -151,6 +184,10 @@ def run_test(args):
                 'org.gnome.Shell', '/org/gnome/Shell', 'org.freedesktop.DBus.Properties', 'Set',
                 GLib.Variant('(ssv)', ('org.gnome.Shell', 'OverviewActive', GLib.Variant('b', False))),
                 None, Gio.DBusCallFlags.NONE, 5000, None)
+            if args.lock_lifecycle:
+                set_test_primary(connection, args.monitors - 1)
+                time.sleep(6)
+                pid = wait_for(renderer)
             assert "'error': <''>" in extension('GetExtensionInfo')
             reply = connection.call_sync(
                 'org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
@@ -184,6 +221,8 @@ def run_test(args):
                 differences.append(difference)
             print('PASS: composited background frames change on every monitor', flush=True)
 
+            if args.lock_lifecycle:
+                test_lock_lifecycle(args, connection, setting, screenshot, crop_monitor)
             setting('paused', 'true')
             wait_for(lambda: usage(pid)[0] == 'T')
             ticks = usage(pid)[1]
@@ -267,6 +306,96 @@ Gtk.main()
             }, indent=2) + '\n')
         finally:
             stop_test_session(shell, extension, renderer)
+
+
+def set_test_primary(connection, index):
+    """Select the right-hand primary output on the disposable compositor only."""
+    from gi.repository import Gio, GLib
+    destination = 'org.gnome.Mutter.DisplayConfig'
+    path = '/org/gnome/Mutter/DisplayConfig'
+    state = connection.call_sync(destination, path, destination, 'GetCurrentState',
+                                 None, None, Gio.DBusCallFlags.NONE, 5000, None).unpack()
+    modes = {spec[0]: next(mode[0] for mode in modes if mode[6].get('is-current'))
+             for spec, modes, _properties in state[1]}
+    monitors = [(x, y, scale, transform, monitor_index == index,
+                 [(spec[0], modes[spec[0]], {}) for spec in specs])
+                for monitor_index, (x, y, scale, transform, _primary, specs, _properties)
+                in enumerate(state[2])]
+    connection.call_sync(destination, path, destination, 'ApplyMonitorsConfig',
+                         GLib.Variant('(uua(iiduba(ssa{sv}))a{sv})',
+                                      (state[0], 1, monitors, {})),
+                         None, Gio.DBusCallFlags.NONE, 5000, None)
+
+
+def test_lock_lifecycle(args, connection, setting, screenshot, crop_monitor):
+    """Check real locking, clear video, keep-awake signals and both outputs after unlock."""
+    from gi.repository import Gio, GLib
+    from PIL import ImageChops, ImageStat
+
+    def probe(method):
+        """Call the isolated probe without exporting controls into the desktop session."""
+        return connection.call_sync('org.gnome.WallpaperTestProbe', '/org/gnome/WallpaperTestProbe',
+                                    'org.gnome.WallpaperTestProbe', method, None, None,
+                                    Gio.DBusCallFlags.NONE, 15000, None).unpack()
+
+    setting('keep-lock-screen-on', 'true')
+    setting('lock-wallpapers', '[]')
+    setting('lock-mirrors', '[true, false]')
+    failures = []
+    for cycle in range(2):
+        probe('Lock')
+        time.sleep(7)
+        state = json.loads(probe('GetState')[0])
+        assert state['locked'], state
+        if state['blank']:
+            failures.append('Lock cycle %d faded to black' % cycle)
+            # Diagnose the subsequent unlock even on the unfixed baseline.
+            probe('Wake')
+        if any(state['blur']):
+            failures.append('Lock cycle %d blurred the video' % cycle)
+        if cycle == 0:
+            time.sleep(32)
+            later = json.loads(probe('GetState')[0])
+            if later['wakeCount'] - state['wakeCount'] < 3:
+                failures.append('No periodic screen wake requests while locked')
+        first = screenshot('lifecycle-lock-%d-0' % cycle)
+        time.sleep(3)
+        second = screenshot('lifecycle-lock-%d-1' % cycle)
+        for index in range(args.monitors):
+            change = ImageStat.Stat(ImageChops.difference(
+                crop_monitor(first, index), crop_monitor(second, index))).mean
+            if max(change) < 0.3:
+                failures.append('Lock cycle %d monitor %d does not animate' % (cycle, index))
+        probe('ShowPrompt')
+        time.sleep(1)
+        state = json.loads(probe('GetState')[0])
+        assert state['promptVisible'], state
+        if any(state['blur']):
+            failures.append('Password prompt blurred the wallpaper')
+        if cycle == 1 and args.monitors == 2:
+            probe('RestackStatic')
+        connection.call_sync('org.gnome.ScreenSaver', '/org/gnome/ScreenSaver',
+                             'org.gnome.ScreenSaver', 'SetActive', GLib.Variant('(b)', (False,)),
+                             None, Gio.DBusCallFlags.NONE, 5000, None)
+        wait_for(lambda: not json.loads(probe('GetState')[0])['locked'])
+        time.sleep(3)
+        state = json.loads(probe('GetState')[0])
+        first = screenshot('lifecycle-desktop-%d-0' % cycle)
+        time.sleep(3)
+        second = screenshot('lifecycle-desktop-%d-1' % cycle)
+        for index in range(args.monitors):
+            change = ImageStat.Stat(ImageChops.difference(
+                crop_monitor(first, index), crop_monitor(second, index))).mean
+            if max(change) < 1:
+                failures.append('Unlock cycle %d monitor %d shows a static background' % (cycle, index))
+        (args.output / ('lifecycle-state-%d.json' % cycle)).write_text(json.dumps(state, indent=2))
+    state = json.loads(probe('GetState')[0])
+    time.sleep(12)
+    assert json.loads(probe('GetState')[0])['wakeCount'] == state['wakeCount'], 'Wake timer survived unlock'
+    setting('keep-lock-screen-on', 'false')
+    (args.output / 'lifecycle-result.json').write_text(json.dumps({'passed': not failures, 'failures': failures}, indent=2))
+    assert not failures, failures
+    print('PASS: real lock cycles retain clear video, wake requests and both desktop outputs', flush=True)
 
 
 def test_renderer_crash(project, renderer_for, usage):
@@ -414,13 +543,14 @@ def main():
     parser.add_argument('--wallpaper', type=Path, required=True)
     parser.add_argument('--assets-dir', type=Path)
     parser.add_argument('--lock-wallpaper', type=Path)
+    parser.add_argument('--lock-lifecycle', action='store_true')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--monitors', type=int, choices=(1, 2), default=1)
     parser.add_argument('--isolated', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    for name in ('result.json', 'lock-result.json'):
+    for name in ('result.json', 'lock-result.json', 'lifecycle-result.json'):
         (args.output / name).unlink(missing_ok=True)
     args.extension_source = args.extension_source.resolve(strict=True)
     metadata = json.loads((args.extension_source / 'metadata.json').read_text())
@@ -466,6 +596,8 @@ def main():
         command = ['dbus-run-session', '--', sys.executable, str(Path(__file__).resolve()),
                    '--isolated', '--extension-source', str(args.extension_source), '--engine', str(args.engine), '--wallpaper', str(args.wallpaper),
                    '--output', str(args.output), '--monitors', str(args.monitors)]
+        if args.lock_lifecycle:
+            command.append('--lock-lifecycle')
         if args.lock_wallpaper:
             command.extend(['--lock-wallpaper', str(args.lock_wallpaper)])
         if args.assets_dir:

@@ -16,16 +16,22 @@ class WallpaperExtension {
         this._signals = [];
         this._renderers = new Map();
         this._recoveryId = 0;
+        this._keepAwakeId = 0;
         this._lockBackgrounds = new Map();
         this._settings = ExtensionUtils.getSettings();
+        this._wasLocked = this._isLocked();
         this._connect(global.window_manager, 'map', (_wm, actor) => this._attach(actor));
         this._connect(global.display, 'in-fullscreen-changed', () => this._updatePause());
         this._connect(Main.layoutManager, 'monitors-changed', () => this._restart());
         this._connect(Main.sessionMode, 'updated', () => this._syncSession());
         this._connect(Main.screenShield, 'locked-changed', () => this._syncSession());
+        this._connect(Main.screenShield, 'active-changed', () => this._updateLockScreenPower());
+        this._connect(Main.screenShield, 'lock-screen-shown', () => this._updateLockScreenPower());
         this._connect(this._settings, 'changed', (_settings, key) => {
             if (key === 'paused')
                 this._updatePause();
+            else if (key === 'keep-lock-screen-on')
+                this._updateLockScreenPower();
             else if (key === 'lock-wallpapers' || key === 'lock-mirrors')
                 this._refreshLockBackgrounds();
             else
@@ -36,6 +42,7 @@ class WallpaperExtension {
             this._connect(Main.layoutManager, 'startup-complete', () => this._launch());
         else
             this._launch();
+        this._updateLockScreenPower();
     }
 
     /** Track a signal connection so disable can disconnect it. */
@@ -154,16 +161,8 @@ class WallpaperExtension {
         renderer.client.hide_from_window_list(window);
         window.move_to_monitor(monitor.index);
         window.move_resize_frame(false, monitor.x, monitor.y, monitor.width, monitor.height);
-        if (renderer === this._desktop) {
-            for (const output of Main.layoutManager.monitors) {
-                const clone = new Clutter.Clone({
-                    source: actor, reactive: false,
-                    x: output.x, y: output.y, width: output.width, height: output.height,
-                });
-                Main.layoutManager._backgroundGroup.add_child(clone);
-                renderer.clones.push(clone);
-            }
-        }
+        if (renderer === this._desktop)
+            this._rebuildDesktopClones(renderer);
         for (const binding of this._lockBackgrounds.values()) {
             if (binding.renderer === renderer)
                 this._cloneLockBackground(binding);
@@ -178,16 +177,68 @@ class WallpaperExtension {
         this._updatePause();
     }
 
+    /** Recreate and restack every output after lock/display transitions. */
+    _rebuildDesktopClones(renderer) {
+        for (const clone of renderer.clones)
+            clone.destroy();
+        renderer.clones = [];
+        for (const output of Main.layoutManager.monitors) {
+            const clone = new Clutter.Clone({
+                source: renderer.actor, reactive: false,
+                x: output.x, y: output.y, width: output.width, height: output.height,
+            });
+            Main.layoutManager._backgroundGroup.add_child(clone);
+            renderer.clones.push(clone);
+        }
+    }
+
     /** Wrap per-monitor background creation while preserving GNOME authentication UI. */
     _installLockBackgrounds() {
         const extension = this;
-        this._originalCreateBackground = UnlockDialog.UnlockDialog.prototype._createBackground;
+        const originalCreate = UnlockDialog.UnlockDialog.prototype._createBackground;
+        this._originalCreateBackground = originalCreate;
         this._createBackground = function (monitorIndex) {
-            extension._originalCreateBackground.call(this, monitorIndex);
+            originalCreate.call(this, monitorIndex);
             if (extension._enabled)
                 extension._bindLockBackground(this._backgroundGroup.get_last_child(), monitorIndex);
         };
         UnlockDialog.UnlockDialog.prototype._createBackground = this._createBackground;
+        const shield = Main.screenShield;
+        const originalShown = shield._lockScreenShown;
+        this._originalLockScreenShown = originalShown;
+        this._lockScreenShown = function (params) {
+            if (extension._enabled && extension._settings.get_boolean('keep-lock-screen-on')) {
+                this._longLightbox.lightOff();
+                this._shortLightbox.lightOff();
+                params = {...params, fadeToBlack: false};
+            }
+            originalShown.call(this, params);
+        };
+        shield._lockScreenShown = this._lockScreenShown;
+    }
+
+    /** Keep the locked display visible using GNOME's normal wake signal, without unlocking. */
+    _updateLockScreenPower() {
+        if (this._keepAwakeId) {
+            GLib.source_remove(this._keepAwakeId);
+            this._keepAwakeId = 0;
+        }
+        if (!this._enabled || !this._settings.get_boolean('keep-lock-screen-on') ||
+            !this._isLocked() || !Main.screenShield.active)
+            return;
+        this._wakeLockScreen();
+        // GNOME 42 grants fifteen seconds per WakeUpScreen request.
+        this._keepAwakeId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 10, () => {
+            this._wakeLockScreen();
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    /** Remove blanking overlays and request display power without touching authentication. */
+    _wakeLockScreen() {
+        Main.screenShield._longLightbox.lightOff();
+        Main.screenShield._shortLightbox.lightOff();
+        Main.screenShield.emit('wake-up-screen');
     }
 
     /** Select the configured project or desktop fallback for one lock monitor. */
@@ -195,7 +246,9 @@ class WallpaperExtension {
         const monitor = Main.layoutManager.monitors[monitorIndex];
         const wallpapers = this._settings.get_strv('lock-wallpapers');
         const wallpaper = wallpapers[monitorIndex] || this._settings.get_string('wallpaper');
+        const blur = widget.get_effect('blur');
         const binding = {
+            blur, blurEnabled: blur ? blur.enabled : false,
             widget, monitorIndex, backgrounds: widget.get_children(), clone: null,
             renderer: this._ensureRenderer(wallpaper, monitor),
         };
@@ -206,7 +259,7 @@ class WallpaperExtension {
         this._updatePause();
     }
 
-    /** Add an optional mirrored surface while keeping the widget blur effect. */
+    /** Add a clear, optionally mirrored video while preserving the clock and prompt. */
     _cloneLockBackground(binding) {
         if (binding.clone)
             return;
@@ -221,6 +274,8 @@ class WallpaperExtension {
             binding.clone.scale_x = -1;
         }
         binding.widget.add_child(binding.clone);
+        if (binding.blur)
+            binding.blur.enabled = false;
         for (const background of binding.backgrounds)
             background.hide();
     }
@@ -239,13 +294,18 @@ class WallpaperExtension {
 
     /** Stop lock-only renderers after unlock and recompute visibility. */
     _syncSession() {
-        if (!this._isLocked()) {
+        const locked = this._isLocked();
+        if (!locked) {
             for (const renderer of this._renderers.values()) {
                 if (renderer !== this._desktop)
                     this._stopRenderer(renderer);
             }
+            if (this._wasLocked && this._desktop && this._desktop.actor)
+                this._rebuildDesktopClones(this._desktop);
         }
+        this._wasLocked = locked;
         this._updatePause();
+        this._updateLockScreenPower();
     }
 
     /** Suspend mapped renderers only when manually paused or unused. */
@@ -286,6 +346,8 @@ class WallpaperExtension {
             if (binding.clone)
                 binding.clone.destroy();
             binding.clone = null;
+            if (binding.blur)
+                binding.blur.enabled = binding.blurEnabled;
             for (const background of binding.backgrounds)
                 background.show();
         }
@@ -332,6 +394,7 @@ class WallpaperExtension {
     /** Restore the background hook, disconnect signals and stop owned processes. */
     disable() {
         this._enabled = false;
+        this._updateLockScreenPower();
         for (const [object, id] of this._signals)
             object.disconnect(id);
         this._signals = [];
@@ -341,6 +404,8 @@ class WallpaperExtension {
         this._lockBackgrounds.clear();
         if (UnlockDialog.UnlockDialog.prototype._createBackground === this._createBackground)
             UnlockDialog.UnlockDialog.prototype._createBackground = this._originalCreateBackground;
+        if (Main.screenShield._lockScreenShown === this._lockScreenShown)
+            Main.screenShield._lockScreenShown = this._originalLockScreenShown;
         const dialog = Main.screenShield._dialog;
         if (dialog)
             dialog._updateBackgrounds();
