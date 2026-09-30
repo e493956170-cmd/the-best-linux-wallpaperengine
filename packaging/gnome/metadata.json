@@ -1,0 +1,9 @@
+{
+  "uuid": "linux-wallpaperengine@almamu.github.io",
+  "name": "Linux Wallpaper Engine",
+  "description": "Run linux-wallpaperengine on the primary GNOME Wayland desktop background.",
+  "shell-version": ["42"],
+  "settings-schema": "org.gnome.shell.extensions.linux-wallpaperengine",
+  "url": "https://github.com/Almamu/linux-wallpaperengine",
+  "version": 1
+}

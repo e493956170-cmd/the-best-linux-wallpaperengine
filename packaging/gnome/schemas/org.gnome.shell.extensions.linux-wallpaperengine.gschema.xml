@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.linux-wallpaperengine" path="/org/gnome/shell/extensions/linux-wallpaperengine/">
+    <key name="engine-path" type="s">
+      <default>'linux-wallpaperengine'</default>
+      <summary>Executable name or absolute path to linux-wallpaperengine</summary>
+    </key>
+    <key name="wallpaper" type="s">
+      <default>''</default>
+      <summary>Absolute wallpaper project directory or Steam workshop ID</summary>
+    </key>
+    <key name="assets-dir" type="s">
+      <default>''</default>
+      <summary>Absolute assets directory, or empty for engine auto-detection</summary>
+    </key>
+    <key name="fps" type="u">
+      <default>30</default>
+      <range min="1" max="240"/>
+      <summary>Rendering frame rate limit</summary>
+    </key>
+    <key name="paused" type="b">
+      <default>false</default>
+      <summary>Pause wallpaper playback</summary>
+    </key>
+  </schema>
+</schemalist>
